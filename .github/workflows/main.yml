@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Extract project
@@ -24,16 +24,14 @@ jobs:
           SETTINGS=$(find project -type f \( -name "settings.gradle.kts" -o -name "settings.gradle" \) | head -1)
 
           if [ -z "$SETTINGS" ]; then
-            echo "ERROR: Gradle project not found"
+            echo "Gradle project not found"
             exit 1
           fi
 
           PROJECT_DIR=$(dirname "$SETTINGS")
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Project: $PROJECT_DIR"
-
-      - name: Set up JDK
+      - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -42,65 +40,77 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Fix duplicate Android resource directories
+      - name: Remove duplicate Android resource configuration
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          BUILD_FILE="app/build.gradle.kts"
-
-          if [ ! -f "$BUILD_FILE" ]; then
-            echo "ERROR: $BUILD_FILE not found"
-            exit 1
-          fi
-
-          cp "$BUILD_FILE" "$BUILD_FILE.backup"
-
-          python3 - <<'PY'
+          python3 <<'PY'
           from pathlib import Path
+          import re
 
           p = Path("app/build.gradle.kts")
+          if not p.exists():
+              raise SystemExit("app/build.gradle.kts not found")
+
           s = p.read_text()
 
-          lines = s.splitlines()
-          out = []
+          # Remove Android sourceSets blocks that redefine resource directories.
+          pattern = r'(?s)sourceSets\s*\{.*?\n\s*\}'
 
-          for line in lines:
-              stripped = line.strip()
+          def clean_block(m):
+              block = m.group(0)
 
-              if "res.srcDirs" in stripped:
-                  continue
+              # Remove resource-directory declarations.
+              block = re.sub(
+                  r'(?m)^\s*(res\s*\.\s*(srcDir|srcDirs)\s*\(.*\)|res\s*\.\s*(srcDir|srcDirs)\s*=\s*.*)\s*$',
+                  '',
+                  block
+              )
 
-              if "res.srcDir" in stripped:
-                  continue
+              return block
 
-              out.append(line)
+          s = re.sub(pattern, clean_block, s)
 
-          s = "\n".join(out) + "\n"
+          # Remove direct duplicate res.srcDir/srcDirs lines anywhere.
+          s = re.sub(
+              r'(?m)^\s*.*res\s*\.\s*(srcDir|srcDirs)\s*\(.*\)\s*$\n?',
+              '',
+              s
+          )
 
           p.write_text(s)
+          print("Resource configuration cleaned.")
           PY
 
-          echo "Duplicate resource directory configuration cleaned."
-
-      - name: Build APK
+      - name: Clean Gradle
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           if [ -f "./gradlew" ]; then
             chmod +x ./gradlew
-            ./gradlew clean assembleDebug --no-daemon
+            ./gradlew clean --no-daemon
           else
-            gradle clean assembleDebug --no-daemon
+            gradle clean --no-daemon
           fi
 
-      - name: Find APK
+      - name: Build Debug APK
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          APK=$(find "${PROJECT_DIR}" -type f -name "*.apk" | head -1)
+          if [ -f "./gradlew" ]; then
+            ./gradlew assembleDebug --no-daemon --stacktrace
+          else
+            gradle assembleDebug --no-daemon --stacktrace
+          fi
+
+      - name: Locate APK
+        run: |
+          APK=$(find "${PROJECT_DIR}/app/build/outputs/apk" -type f -name "*.apk" | head -1)
 
           if [ -z "$APK" ]; then
-            echo "ERROR: APK was not generated"
+            echo "APK NOT FOUND"
+            find "${PROJECT_DIR}/app/build/outputs" -type f || true
             exit 1
           fi
 
-          echo "APK found: $APK"
+          echo "APK FOUND: $APK"
           cp "$APK" night-dream-debug.apk
 
       - name: Upload APK
