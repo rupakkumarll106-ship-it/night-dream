@@ -24,12 +24,14 @@ jobs:
           SETTINGS=$(find project -type f \( -name "settings.gradle.kts" -o -name "settings.gradle" \) | head -1)
 
           if [ -z "$SETTINGS" ]; then
-            echo "Gradle project not found"
+            echo "ERROR: Gradle project not found"
             exit 1
           fi
 
           PROJECT_DIR=$(dirname "$SETTINGS")
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "Project directory: $PROJECT_DIR"
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -40,46 +42,76 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Remove duplicate Android resource configuration
+      - name: Remove duplicate sourceSets configuration
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           python3 <<'PY'
           from pathlib import Path
-          import re
 
           p = Path("app/build.gradle.kts")
+
           if not p.exists():
               raise SystemExit("app/build.gradle.kts not found")
 
-          s = p.read_text()
+          text = p.read_text()
 
-          # Remove Android sourceSets blocks that redefine resource directories.
-          pattern = r'(?s)sourceSets\s*\{.*?\n\s*\}'
+          def remove_block(text, keyword):
+              start = text.find(keyword)
 
-          def clean_block(m):
-              block = m.group(0)
+              while start != -1:
+                  brace = text.find("{", start)
 
-              # Remove resource-directory declarations.
-              block = re.sub(
-                  r'(?m)^\s*(res\s*\.\s*(srcDir|srcDirs)\s*\(.*\)|res\s*\.\s*(srcDir|srcDirs)\s*=\s*.*)\s*$',
-                  '',
-                  block
-              )
+                  if brace == -1:
+                      break
 
-              return block
+                  depth = 0
+                  quote = None
+                  escape = False
+                  end = None
 
-          s = re.sub(pattern, clean_block, s)
+                  for i in range(brace, len(text)):
+                      c = text[i]
 
-          # Remove direct duplicate res.srcDir/srcDirs lines anywhere.
-          s = re.sub(
-              r'(?m)^\s*.*res\s*\.\s*(srcDir|srcDirs)\s*\(.*\)\s*$\n?',
-              '',
-              s
-          )
+                      if quote:
+                          if escape:
+                              escape = False
+                          elif c == "\\":
+                              escape = True
+                          elif c == quote:
+                              quote = None
+                          continue
 
-          p.write_text(s)
-          print("Resource configuration cleaned.")
+                      if c in ('"', "'"):
+                          quote = c
+                          continue
+
+                      if c == "{":
+                          depth += 1
+                      elif c == "}":
+                          depth -= 1
+
+                          if depth == 0:
+                              end = i + 1
+                              break
+
+                  if end is None:
+                      break
+
+                  text = text[:start] + text[end:]
+                  start = text.find(keyword)
+
+              return text
+
+          # Remove every custom sourceSets block.
+          text = remove_block(text, "sourceSets")
+
+          p.write_text(text)
+
+          print("Custom sourceSets configuration removed.")
           PY
+
+          echo "Checking remaining sourceSets:"
+          grep -n "sourceSets" app/build.gradle.kts || true
 
       - name: Clean Gradle
         working-directory: ${{ env.PROJECT_DIR }}
@@ -100,13 +132,12 @@ jobs:
             gradle assembleDebug --no-daemon --stacktrace
           fi
 
-      - name: Locate APK
+      - name: Find APK
         run: |
           APK=$(find "${PROJECT_DIR}/app/build/outputs/apk" -type f -name "*.apk" | head -1)
 
           if [ -z "$APK" ]; then
-            echo "APK NOT FOUND"
-            find "${PROJECT_DIR}/app/build/outputs" -type f || true
+            echo "ERROR: APK not found"
             exit 1
           fi
 
